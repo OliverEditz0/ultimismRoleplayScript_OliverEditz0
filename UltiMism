@@ -1,0 +1,675 @@
+-- Made by @OliverEditz0 w/ ChatGPT
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- ===== utilities =====
+local function getCharacter()
+	local c = LocalPlayer.Character
+	if c and c.Parent then return c end
+	return LocalPlayer.CharacterAdded:Wait()
+end
+local function getHumanoidRootPart(char)
+	return char and char:FindFirstChild("HumanoidRootPart")
+end
+local function getHumanoid(char)
+	return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function trim(s)
+	return s and s:match("^%s*(.-)%s*$") or ""
+end
+
+local function toNumberSafe(s, fallback)
+	local n = tonumber(s)
+	if n == nil then return fallback end
+	return n
+end
+
+-- find player by username or display name (case-insensitive, exact then partial)
+local function findPlayerByNameOrDisplay(query)
+	if not query or query == "" then return nil end
+	local q = string.lower(query)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if string.lower(p.Name) == q or string.lower(p.DisplayName) == q then
+			return p
+		end
+	end
+	for _, p in ipairs(Players:GetPlayers()) do
+		if string.find(string.lower(p.Name), q, 1, true) or string.find(string.lower(p.DisplayName), q, 1, true) then
+			return p
+		end
+	end
+	return nil
+end
+
+local function pickRandomPlayer()
+	local candidates = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= LocalPlayer then
+			local c = p.Character
+			if c and c.Parent then
+				local hrp = c:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					table.insert(candidates, p)
+				end
+			end
+		end
+	end
+	if #candidates == 0 then return nil end
+	return candidates[math.random(1, #candidates)]
+end
+
+local function findGroundYAt(positionXZ, ignoreList)
+	local origin = Vector3.new(positionXZ.X, positionXZ.Y + 10, positionXZ.Z)
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = ignoreList or {}
+	params.FilterType = Enum.RaycastFilterType.Blacklist
+	params.IgnoreWater = true
+	local result = workspace:Raycast(origin, Vector3.new(0, -500, 0), params)
+	if result and result.Position then
+		return result.Position.Y
+	end
+	return nil
+end
+
+-- ===== default adjustable constants =====
+local LR_DISTANCE = 1          -- default (editable via UI)
+local LR_DELAY = 0.035         -- default (editable via UI)
+local RAPID_DOWN_DIST = 30
+local RAPID_DELAY = 0.06
+local RAPID_DOWN_TIME = 0.05
+
+-- clamps / step sizes
+local LR_DISTANCE_MIN, LR_DISTANCE_MAX, LR_DISTANCE_STEP = 0, 10, 0.5
+local LR_DELAY_MIN, LR_DELAY_MAX, LR_DELAY_STEP = 0.005, 1, 0.005
+
+-- ===== UI =====
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "TinyMenuGui_Client_TeleportBehind"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = playerGui
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- open button
+local openBtn = Instance.new("TextButton")
+openBtn.Name = "OpenBtn"
+openBtn.Size = UDim2.new(0, 46, 0, 46)
+openBtn.Position = UDim2.new(0, 8, 0.5, -23)
+openBtn.BackgroundTransparency = 0.12
+openBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+openBtn.BorderSizePixel = 0
+openBtn.Text = "≡"
+openBtn.Font = Enum.Font.SourceSansBold
+openBtn.TextSize = 26
+openBtn.TextColor3 = Color3.new(1,1,1)
+openBtn.Parent = screenGui
+openBtn.AutoButtonColor = true
+openBtn.ZIndex = 10
+
+-- menu frame (tweening)
+local menuFrame = Instance.new("Frame")
+menuFrame.Name = "MenuFrame"
+menuFrame.Size = UDim2.new(0, 340, 0, 340)
+menuFrame.Position = UDim2.new(0, -380, 0.5, -170) -- offscreen left initially
+menuFrame.AnchorPoint = Vector2.new(0,0)
+menuFrame.BackgroundColor3 = Color3.fromRGB(28,28,28)
+menuFrame.BorderSizePixel = 0
+menuFrame.Parent = screenGui
+menuFrame.ZIndex = 9
+menuFrame.Visible = true
+menuFrame.ClipsDescendants = true
+
+-- scale wrapper for pop effect
+local scaleFrame = Instance.new("Frame", menuFrame)
+scaleFrame.Size = UDim2.new(1,0,1,0)
+scaleFrame.Position = UDim2.new(0,0,0,0)
+scaleFrame.BackgroundTransparency = 1
+scaleFrame.ZIndex = 9
+
+local title = Instance.new("TextLabel", scaleFrame)
+title.Size = UDim2.new(1, -12, 0, 30)
+title.Position = UDim2.new(0, 6, 0, 6)
+title.BackgroundTransparency = 1
+title.Text = "Empty_Soul's Abilities"
+title.Font = Enum.Font.GothamBold
+title.TextSize = 18
+title.TextColor3 = Color3.fromRGB(235,235,235)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.ZIndex = 9
+
+-- scrolling content
+local scroll = Instance.new("ScrollingFrame", scaleFrame)
+scroll.Size = UDim2.new(1, -12, 1, -76)
+scroll.Position = UDim2.new(0, 6, 0, 46)
+scroll.BackgroundTransparency = 1
+scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+scroll.ScrollBarThickness = 6
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.ZIndex = 9
+
+local listLayout = Instance.new("UIListLayout", scroll)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 8)
+
+local uiPadding = Instance.new("UIPadding", scroll)
+uiPadding.PaddingTop = UDim.new(0, 4)
+uiPadding.PaddingBottom = UDim.new(0, 6)
+uiPadding.PaddingLeft = UDim.new(0, 6)
+uiPadding.PaddingRight = UDim.new(0, 6)
+
+-- helper to create a toggle row
+local function createRow(text)
+	local container = Instance.new("Frame")
+	container.Size = UDim2.new(1, 0, 0, 42)
+	container.BackgroundTransparency = 1
+	container.Parent = scroll
+
+	local label = Instance.new("TextLabel", container)
+	label.Size = UDim2.new(0.66, 0, 1, 0)
+	label.Position = UDim2.new(0, 6, 0, 0)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.Font = Enum.Font.Gotham
+	label.TextSize = 15
+	label.TextColor3 = Color3.fromRGB(230,230,230)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.ZIndex = 9
+
+	local btn = Instance.new("TextButton", container)
+	btn.Size = UDim2.new(0, 86, 0, 30)
+	btn.Position = UDim2.new(1, -92, 0.5, -15)
+	btn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+	btn.BorderSizePixel = 0
+	btn.Text = "OFF"
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 14
+	btn.TextColor3 = Color3.fromRGB(255,255,255)
+	btn.AutoButtonColor = true
+	btn.ZIndex = 9
+
+	return container, btn
+end
+
+-- create the existing toggles
+local _, btnLR = createRow("LR Teleport + Noclip")
+local _, btnRapid = createRow("Rapid Down↕")
+local _, btnFreeze = createRow("Freeze Camera")
+
+-- ===== NEW: Input bar row + Teleport button row + status row =====
+local inputContainer = Instance.new("Frame")
+inputContainer.Size = UDim2.new(1, 0, 0, 48)
+inputContainer.BackgroundTransparency = 1
+inputContainer.Parent = scroll
+
+local inputLabel = Instance.new("TextLabel", inputContainer)
+inputLabel.Size = UDim2.new(1, 0, 0, 18)
+inputLabel.Position = UDim2.new(0, 6, 0, 0)
+inputLabel.BackgroundTransparency = 1
+inputLabel.Text = "Enter username or display name:" -- exact text requested
+inputLabel.Font = Enum.Font.Gotham
+inputLabel.TextSize = 13
+inputLabel.TextColor3 = Color3.fromRGB(220,220,220)
+inputLabel.TextXAlignment = Enum.TextXAlignment.Left
+inputLabel.ZIndex = 9
+
+local nameBox = Instance.new("TextBox", inputContainer)
+nameBox.Size = UDim2.new(1, -12, 0, 26)
+nameBox.Position = UDim2.new(0, 6, 0, 20)
+nameBox.PlaceholderText = "PlayerName or DisplayName (or 'random')"
+nameBox.Text = ""
+nameBox.ClearTextOnFocus = false
+nameBox.TextColor3 = Color3.fromRGB(0,0,0)
+nameBox.Font = Enum.Font.SourceSans
+nameBox.TextSize = 16
+nameBox.BackgroundColor3 = Color3.fromRGB(255,255,255) -- white input bar
+nameBox.BorderSizePixel = 0
+nameBox.ZIndex = 9
+
+local telContainer = Instance.new("Frame")
+telContainer.Size = UDim2.new(1, 0, 0, 40)
+telContainer.BackgroundTransparency = 1
+telContainer.Parent = scroll
+
+local telBtn = Instance.new("TextButton", telContainer)
+telBtn.Size = UDim2.new(0, 160, 0, 32)
+telBtn.Position = UDim2.new(0.5, -80, 0.5, -16)
+telBtn.BackgroundColor3 = Color3.fromRGB(0,120,215)
+telBtn.BorderSizePixel = 0
+telBtn.Text = "Teleport Behind"
+telBtn.Font = Enum.Font.GothamBold
+telBtn.TextSize = 15
+telBtn.TextColor3 = Color3.fromRGB(255,255,255)
+telBtn.ZIndex = 9
+telBtn.AutoButtonColor = true
+
+local statusContainer = Instance.new("Frame")
+statusContainer.Size = UDim2.new(1, 0, 0, 26)
+statusContainer.BackgroundTransparency = 1
+statusContainer.Parent = scroll
+
+local statusLabel = Instance.new("TextLabel", statusContainer)
+statusLabel.Size = UDim2.new(1, -12, 1, 0)
+statusLabel.Position = UDim2.new(0, 6, 0, 0)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = ""
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 14
+statusLabel.TextColor3 = Color3.fromRGB(200,200,200)
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.ZIndex = 9
+
+-- ===== NEW: LR settings controls =====
+local function createNumberControlRow(labelText, initialValue, minV, maxV, step)
+	local container = Instance.new("Frame")
+	container.Size = UDim2.new(1, 0, 0, 42)
+	container.BackgroundTransparency = 1
+	container.Parent = scroll
+
+	local label = Instance.new("TextLabel", container)
+	label.Size = UDim2.new(0.45, 0, 1, 0)
+	label.Position = UDim2.new(0, 6, 0, 0)
+	label.BackgroundTransparency = 1
+	label.Text = labelText
+	label.Font = Enum.Font.Gotham
+	label.TextSize = 14
+	label.TextColor3 = Color3.fromRGB(230,230,230)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.ZIndex = 9
+
+	local minus = Instance.new("TextButton", container)
+	minus.Size = UDim2.new(0, 28, 0, 28)
+	minus.Position = UDim2.new(1, -150, 0.5, -14)
+	minus.Text = "−"
+	minus.Font = Enum.Font.SourceSansBold
+	minus.TextSize = 20
+	minus.BackgroundColor3 = Color3.fromRGB(60,60,60)
+	minus.BorderSizePixel = 0
+	minus.ZIndex = 9
+	minus.AutoButtonColor = true
+
+	local valueBox = Instance.new("TextBox", container)
+	valueBox.Size = UDim2.new(0, 88, 0, 28)
+	valueBox.Position = UDim2.new(1, -116, 0.5, -14)
+	valueBox.Text = tostring(initialValue)
+	valueBox.ClearTextOnFocus = false
+	valueBox.TextColor3 = Color3.fromRGB(0,0,0)
+	valueBox.Font = Enum.Font.SourceSans
+	valueBox.TextSize = 16
+	valueBox.BackgroundColor3 = Color3.fromRGB(255,255,255)
+	valueBox.BorderSizePixel = 0
+	valueBox.ZIndex = 9
+
+	local plus = Instance.new("TextButton", container)
+	plus.Size = UDim2.new(0, 28, 0, 28)
+	plus.Position = UDim2.new(1, -24, 0.5, -14)
+	plus.Text = "+"
+	plus.Font = Enum.Font.SourceSansBold
+	plus.TextSize = 20
+	plus.BackgroundColor3 = Color3.fromRGB(60,60,60)
+	plus.BorderSizePixel = 0
+	plus.ZIndex = 9
+	plus.AutoButtonColor = true
+
+	-- helper functions to change value
+	local function clamp(v)
+		if v < minV then v = minV end
+		if v > maxV then v = maxV end
+		return v
+	end
+
+	local function setValue(v)
+		v = tonumber(v) or minV
+		v = clamp(v)
+		valueBox.Text = tostring(v)
+		return v
+	end
+
+	-- Hook up +/- and TextBox enter
+	minus.Activated:Connect(function()
+		local cur = toNumberSafe(valueBox.Text, initialValue)
+		local new = cur - step
+		new = setValue(new)
+		-- callback handled outside by referencing valueBox.Text
+	end)
+	plus.Activated:Connect(function()
+		local cur = toNumberSafe(valueBox.Text, initialValue)
+		local new = cur + step
+		new = setValue(new)
+	end)
+	valueBox.FocusLost:Connect(function(enterPressed)
+		-- sanitize input on focus lost
+		setValue(valueBox.Text)
+	end)
+
+	return container, valueBox, setValue
+end
+
+-- create controls for LR_DISTANCE and LR_DELAY
+local _, distanceBox = createNumberControlRow("LR Distance", LR_DISTANCE, LR_DISTANCE_MIN, LR_DISTANCE_MAX, LR_DISTANCE_STEP)
+local _, delayBox = createNumberControlRow("LR Delay (s)", LR_DELAY, LR_DELAY_MIN, LR_DELAY_MAX, LR_DELAY_STEP)
+
+-- when value changes we apply to variables (validate)
+local function applyLRSettings()
+	local d = toNumberSafe(distanceBox.Text, LR_DISTANCE)
+	local dd = toNumberSafe(delayBox.Text, LR_DELAY)
+	-- clamp
+	if d < LR_DISTANCE_MIN then d = LR_DISTANCE_MIN end
+	if d > LR_DISTANCE_MAX then d = LR_DISTANCE_MAX end
+	if dd < LR_DELAY_MIN then dd = LR_DELAY_MIN end
+	if dd > LR_DELAY_MAX then dd = LR_DELAY_MAX end
+	LR_DISTANCE = d
+	LR_DELAY = dd
+	-- reflect sanitized values in UI
+	distanceBox.Text = tostring(LR_DISTANCE)
+	delayBox.Text = tostring(LR_DELAY)
+end
+
+distanceBox.FocusLost:Connect(function()
+	applyLRSettings()
+end)
+delayBox.FocusLost:Connect(function()
+	applyLRSettings()
+end)
+
+-- Also apply when user taps anywhere on the +/- (they already call setValue)
+-- but ensure values are applied each heartbeat so coroutine sees current values
+RunService.Heartbeat:Connect(function()
+	applyLRSettings()
+end)
+
+-- ===== Tweens for menu open/close =====
+local openPos = UDim2.new(0, 92, 0.5, -170)
+local closedPos = UDim2.new(0, -380, 0.5, -170)
+
+local posOpenTweenInfo = TweenInfo.new(0.36, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local posCloseTweenInfo = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+local popTweenInfo = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local shrinkTweenInfo = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+local menuOpen = false
+local function openMenu()
+	if menuOpen then return end
+	menuOpen = true
+	TweenService:Create(menuFrame, posOpenTweenInfo, {Position = openPos}):Play()
+	scaleFrame.Size = UDim2.new(0.98,0,0.98,0)
+	TweenService:Create(scaleFrame, popTweenInfo, {Size = UDim2.new(1,0,1,0)}):Play()
+	openBtn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+	openBtn.Text = "×"
+end
+local function closeMenu()
+	if not menuOpen then return end
+	menuOpen = false
+	TweenService:Create(menuFrame, posCloseTweenInfo, {Position = closedPos}):Play()
+	TweenService:Create(scaleFrame, shrinkTweenInfo, {Size = UDim2.new(0.98,0,0.98,0)}):Play()
+	openBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+	openBtn.Text = "≡"
+end
+
+openBtn.Activated:Connect(function()
+	if menuOpen then closeMenu() else openMenu() end
+end)
+
+-- ensure initial closed state
+menuFrame.Position = closedPos
+openBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+
+-- ===== Mechanics: toggles, noclip, rapid, freeze =====
+local toggles = { LR_Noclip = false, RapidDown = false, FreezeCam = false }
+
+-- Noclip per-frame implementation (user-provided Stepped style) + safe restore
+local originalCollisions = {} -- [part] = bool
+local lrSteppedConn = nil
+local lrCoroutine = nil
+
+local function restoreCharacterCollisions()
+	for part, stored in pairs(originalCollisions) do
+		if part and part.Parent then
+			pcall(function() part.CanCollide = stored end)
+		end
+	end
+	originalCollisions = {}
+end
+
+local function startLRTeleport()
+	local char = getCharacter()
+	local hrp = getHumanoidRootPart(char)
+	if not hrp then return end
+
+	-- record existing parts original CanCollide
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			if originalCollisions[part] == nil then
+				originalCollisions[part] = part.CanCollide
+			end
+		end
+	end
+
+	-- per-frame Stepped loop to set CanCollide = false (user's snippet style)
+	if not lrSteppedConn then
+		lrSteppedConn = RunService.Stepped:Connect(function()
+			local c = LocalPlayer.Character
+			if not c then return end
+			for _, v in ipairs(c:GetDescendants()) do
+				if v:IsA("BasePart") then
+					-- store original if we haven't yet (so we can restore later)
+					if originalCollisions[v] == nil then
+						originalCollisions[v] = v.CanCollide
+					end
+					pcall(function() v.CanCollide = false end)
+				end
+			end
+		end)
+	end
+
+	-- left-right small teleport coroutine (reads LR_DISTANCE & LR_DELAY live)
+	lrCoroutine = coroutine.create(function()
+		local dir = 1
+		while toggles.LR_Noclip do
+			local c = LocalPlayer.Character
+			local hrpNow = c and c:FindFirstChild("HumanoidRootPart")
+			if not hrpNow then break end
+			local look = hrpNow.CFrame.LookVector
+			local right = hrpNow.CFrame.RightVector
+			local offset = right * (LR_DISTANCE * dir)
+			local target = hrpNow.CFrame + offset
+			pcall(function() hrpNow.CFrame = CFrame.new(target.Position, target.Position + look) end)
+			dir = -dir
+			task.wait(LR_DELAY)
+		end
+	end)
+	coroutine.resume(lrCoroutine)
+end
+
+local function stopLRTeleport()
+	toggles.LR_Noclip = false
+
+	-- disconnect the per-frame noclip connection
+	if lrSteppedConn then
+		lrSteppedConn:Disconnect()
+		lrSteppedConn = nil
+	end
+
+	-- restore recorded collisions
+	restoreCharacterCollisions()
+end
+
+-- Rapid down
+local rapidCoroutine
+local function startRapidDown()
+	rapidCoroutine = coroutine.create(function()
+		while toggles.RapidDown do
+			local char = LocalPlayer.Character
+			local hrp = getHumanoidRootPart(char)
+			if not hrp then break end
+			local originalCFrame = hrp.CFrame
+			pcall(function() hrp.CFrame = originalCFrame + Vector3.new(0, -RAPID_DOWN_DIST, 0) end)
+			task.wait(RAPID_DOWN_TIME)
+			pcall(function() hrp.CFrame = originalCFrame end)
+			task.wait(RAPID_DELAY)
+		end
+	end)
+	coroutine.resume(rapidCoroutine)
+end
+local function stopRapidDown() toggles.RapidDown = false end
+
+-- Freeze camera
+local freezeConn
+local previousCameraType
+local previousCameraSubject
+local freezeCFrame
+local function startFreezeCamera()
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	previousCameraType = cam.CameraType
+	previousCameraSubject = cam.CameraSubject
+	freezeCFrame = cam.CFrame
+	cam.CameraType = Enum.CameraType.Scriptable
+	cam.CFrame = freezeCFrame
+	freezeConn = RunService.RenderStepped:Connect(function() cam.CFrame = freezeCFrame end)
+end
+local function stopFreezeCamera()
+	local cam = workspace.CurrentCamera
+	if freezeConn then freezeConn:Disconnect(); freezeConn = nil end
+	if cam then
+		cam.CameraType = previousCameraType or Enum.CameraType.Custom
+		if previousCameraSubject then pcall(function() cam.CameraSubject = previousCameraSubject end) end
+	end
+end
+
+local function setButtonVisual(btn, enabled)
+	if enabled then
+		btn.BackgroundColor3 = Color3.fromRGB(0,140,75)
+		btn.Text = "ON"
+	else
+		btn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+		btn.Text = "OFF"
+	end
+end
+
+-- hook up core toggles
+btnLR.Activated:Connect(function()
+	toggles.LR_Noclip = not toggles.LR_Noclip
+	setButtonVisual(btnLR, toggles.LR_Noclip)
+	if toggles.LR_Noclip then startLRTeleport() else stopLRTeleport() end
+end)
+btnRapid.Activated:Connect(function()
+	toggles.RapidDown = not toggles.RapidDown
+	setButtonVisual(btnRapid, toggles.RapidDown)
+	if toggles.RapidDown then startRapidDown() else stopRapidDown() end
+end)
+btnFreeze.Activated:Connect(function()
+	toggles.FreezeCam = not toggles.FreezeCam
+	setButtonVisual(btnFreeze, toggles.FreezeCam)
+	if toggles.FreezeCam then startFreezeCamera() else stopFreezeCamera() end
+end)
+
+-- ===== Teleport Behind logic (supports 'random') =====
+local TELEPORT_BEHIND_DISTANCE = 3 -- studs behind the target
+local teleDebounce = false
+local TELEPORT_DEBOUNCE_TIME = 0.35
+
+local function setStatus(text, color)
+	statusLabel.Text = text or ""
+	if color then
+		statusLabel.TextColor3 = color
+	else
+		statusLabel.TextColor3 = Color3.fromRGB(200,200,200)
+	end
+	task.delay(3, function()
+		if statusLabel and statusLabel.Parent then
+			statusLabel.Text = ""
+		end
+	end)
+end
+
+telBtn.Activated:Connect(function()
+	if teleDebounce then return end
+	teleDebounce = true
+	task.delay(TELEPORT_DEBOUNCE_TIME, function() teleDebounce = false end)
+
+	local rawQuery = tostring(nameBox.Text or "")
+	local query = trim(rawQuery)
+	if query == "" then
+		setStatus("Enter a username or display name.", Color3.fromRGB(220,120,80))
+		return
+	end
+
+	local qlower = string.lower(query)
+	local targetPlayer
+	if qlower == "random" then
+		targetPlayer = pickRandomPlayer()
+		if not targetPlayer then
+			setStatus("No other players found to teleport to.", Color3.fromRGB(220,120,80))
+			return
+		end
+	else
+		targetPlayer = findPlayerByNameOrDisplay(query)
+		if not targetPlayer then
+			setStatus("Player not found.", Color3.fromRGB(220,120,80))
+			return
+		end
+	end
+
+	local targetChar = targetPlayer.Character
+	local targetHRP = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+	if not targetHRP then
+		setStatus("Target has no character loaded.", Color3.fromRGB(220,120,80))
+		return
+	end
+
+	local behindDir = -targetHRP.CFrame.LookVector
+	local desiredXZ = targetHRP.Position + behindDir * TELEPORT_BEHIND_DISTANCE
+	local groundY = findGroundYAt(Vector3.new(desiredXZ.X, targetHRP.Position.Y + 6, desiredXZ.Z), {targetChar})
+	local humanoidLocal = getHumanoid(LocalPlayer.Character)
+	local hipHeight = (humanoidLocal and humanoidLocal.HipHeight) or 2
+	local desiredY
+	if groundY then
+		desiredY = groundY + hipHeight + 0.3
+	else
+		desiredY = targetHRP.Position.Y
+	end
+
+	local destPos = Vector3.new(desiredXZ.X, desiredY, desiredXZ.Z)
+	local lookAt = Vector3.new(targetHRP.Position.X, desiredY, targetHRP.Position.Z)
+	local newCFrame = CFrame.new(destPos, lookAt)
+
+	local localChar = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+	local localHRP = localChar and localChar:FindFirstChild("HumanoidRootPart")
+	if not localHRP then
+		setStatus("Your character hasn't loaded yet.", Color3.fromRGB(220,120,80))
+		return
+	end
+
+	local success, err = pcall(function()
+		localHRP.CFrame = newCFrame
+	end)
+
+	if success then
+		setStatus("Teleported behind "..targetPlayer.Name.." ✓", Color3.fromRGB(120,200,140))
+	else
+		setStatus("Teleport failed: "..tostring(err), Color3.fromRGB(220,120,80))
+	end
+end)
+
+-- Keep LR noclip persistent on respawn if enabled
+LocalPlayer.CharacterAdded:Connect(function(char)
+	task.wait(0.2)
+	if toggles.LR_Noclip then
+		-- re-create per-frame Stepped loop and coroutine for the new character
+		startLRTeleport()
+	end
+end)
+
+-- Cleanup on close
+local function cleanupAll()
+	stopLRTeleport()
+	stopRapidDown()
+	stopFreezeCamera()
+end
+game:BindToClose(cleanupAll)
